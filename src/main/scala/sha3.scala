@@ -3,11 +3,13 @@
 package sha3
 
 import Chisel._
-import chisel3.util.{HasBlackBoxResource}
-import freechips.rocketchip.tile._
+import chisel3.stage.ChiselStage
+import chisel3.util.HasBlackBoxResource
+import freechips.rocketchip.tile.{TileVisibilityNodeKey, _}
+import freechips.rocketchip.tilelink.{TLEphemeralNode, _}
 import freechips.rocketchip.config._
 import freechips.rocketchip.diplomacy._
-import freechips.rocketchip.rocket.{TLBConfig, HellaCacheReq}
+import freechips.rocketchip.rocket.{HellaCacheReq, TLBConfig}
 
 
 case object Sha3WidthP extends Field[Int]
@@ -170,7 +172,7 @@ class WithSha3Accel extends Config ((site, here, up) => {
   case Sha3BufferSram => false
   case Sha3Keccak => false
   case Sha3BlackBox => false
-  case Sha3TLB => Some(TLBConfig(nEntries = 4, nSectors = 1, nSuperpageEntries = 1))
+  case Sha3TLB => Some(TLBConfig(nSets = 1, nWays =1, nSuperpageEntries = 1))
   case BuildRoCC => up(BuildRoCC) ++ Seq(
     (p: Parameters) => {
       val sha3 = LazyModule.apply(new Sha3Accel(OpcodeSet.custom2)(p))
@@ -182,3 +184,36 @@ class WithSha3Accel extends Config ((site, here, up) => {
 class WithSha3Printf extends Config((site, here, up) => {
   case Sha3PrintfEnable => true
 })
+
+class Sha3Top()(implicit p: Parameters) extends LazyModule {
+  val sha3 = LazyModule(new Sha3Accel(OpcodeSet.custom0)(p))
+  val slaveParams = TLSlaveParameters.v1(Seq(AddressSet(0x10000,0xffff)), Seq(),
+      RegionType.GET_EFFECTS, false, Seq(),
+      TransferSizes.none,TransferSizes.none,TransferSizes.none,TransferSizes.none,
+      TransferSizes(1,64), TransferSizes.none, TransferSizes.none, TransferSizes.none)
+  val node = TLManagerNode(Seq(TLSlavePortParameters.v1(Seq(slaveParams), 8)))
+  p(TileVisibilityNodeKey) := sha3.tlNode
+  node := p(TileVisibilityNodeKey)
+  lazy val module = new LazyModuleImp(this){
+    val io = IO(new RoCCIO(1))
+    io <> sha3.module.io
+  }
+}
+
+import freechips.rocketchip.groundtest.TraceGenConfig
+object sha3Verilog extends App{
+  implicit val p:Parameters = new Config((site, here, up) =>{
+    case Sha3WidthP => 64
+    case Sha3Stages => 1
+    case Sha3FastMem => true
+    case Sha3BufferSram => false
+    case Sha3Keccak => false
+    case Sha3BlackBox => false
+    case Sha3TLB => Some(TLBConfig(nSets = 4, nWays =4, nSuperpageEntries = 1))
+    //case Sha3TLB => None
+  }) ++ new TraceGenConfig()
+  val myTileParams: TileParams = RocketTileParams()
+  val q: Parameters = p.alterMap(Map(TileKey -> myTileParams,
+    TileVisibilityNodeKey -> TLEphemeralNode()(ValName("tile_master"))))
+  val verilog = (new ChiselStage).emitVerilog(LazyModule(new Sha3Top()(q)).module, args)
+}
